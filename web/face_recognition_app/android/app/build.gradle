@@ -1,0 +1,21 @@
+android {
+    namespace = "com.example.face_recognition_app"  // Sesuaikan dengan package Anda
+    compileSdk = 34  // Atau lebih tinggi
+    
+    defaultConfig {
+        applicationId = "com.example.face_recognition_app"
+        minSdk = 21
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17  // ← Minimal Java 17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'  // ← Kotlin juga harus Java 17
+    }
+}
