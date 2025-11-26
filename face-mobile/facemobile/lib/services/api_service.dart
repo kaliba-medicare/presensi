@@ -51,18 +51,11 @@ class ApiService {
     try {
       print('📡 Registering face with ${embedding.length} dimensions...');
 
-      // final resp = await dio.post(
-      //   '/api/face/register',
-      //   data: {
-      //     'embedding': embedding,
-      //     if (photoBase64 != null) 'photo_base64': photoBase64,
-      //   },
-      // );
       final resp = await dio.post(
         '/api/face/register',
         data: {
           'embedding': embedding,
-          if (photoBase64 != null) 'photo_base64': photoBase64,
+          'photo_base64': photoBase64,
         },
       );
 
@@ -111,7 +104,7 @@ class ApiService {
   /// Verify face for check-in
   Future<dynamic> verifyFace(
     List<double> embedding, {
-    // String? photoBase64,
+    String? photoBase64,
     String? location,
   }) async {
     try {
@@ -121,7 +114,7 @@ class ApiService {
         '/api/face/verify',
         data: {
           'embedding': embedding,
-          // if (photoBase64 != null) 'photo_base64': photoBase64,
+          if (photoBase64 != null) 'photo_base64': photoBase64,
           if (location != null) 'location': location,
         },
       );

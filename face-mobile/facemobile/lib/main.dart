@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'pages/login_page.dart';
 import 'pages/home_page.dart';
-import 'services/api_service.dart';
 import 'dart:convert'; // Add this import for JSON encoding
 
 void main() {
@@ -83,7 +82,7 @@ class LoginPageWrapper extends StatefulWidget {
 
 class _LoginPageWrapperState extends State<LoginPageWrapper> {
   // TODO: Ganti dengan URL server Anda
-  final String baseUrl = 'http://192.168.10.213:8000';
+  final String baseUrl = 'http://192.168.10.166:8000';
 
   @override
   Widget build(BuildContext context) {
@@ -102,7 +101,7 @@ class HomePageWrapper extends StatefulWidget {
 
 class _HomePageWrapperState extends State<HomePageWrapper> {
   // TODO: Ganti dengan URL server Anda
-  final String baseUrl = 'http://192.168.10.213:8000';
+  final String baseUrl = 'http://192.168.10.166:8000';
   Map<String, dynamic>? userData;
   String? token;
   late Future<void> _loadData;

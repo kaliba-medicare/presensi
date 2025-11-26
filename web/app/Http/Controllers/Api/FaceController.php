@@ -35,10 +35,13 @@ class FaceController extends Controller
         $encrypted = Crypt::encryptString($embeddingJson);
 
         FaceEmbedding::updateOrCreate(
-            ['user_id' => $user->id],
-            ['embedding' => $encrypted],
-            ['photo_path' => $photoPath]
+            ['user_id' => $user->id], 
+            [
+                'embedding'  => $encrypted,
+                'photo_path' => $photoPath,
+            ]
         );
+
 
         return response()->json(['message'=>'Face registered']);
     }

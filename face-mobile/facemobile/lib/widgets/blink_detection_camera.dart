@@ -1,3 +1,954 @@
+// // lib/widgets/blink_detection_camera.dart
+// import 'dart:async';
+// import 'dart:io';
+// import 'package:flutter/foundation.dart';
+// import 'package:flutter/material.dart';
+// import 'package:camera/camera.dart';
+// import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+// import 'package:path_provider/path_provider.dart';
+// import 'package:permission_handler/permission_handler.dart';
+
+// class BlinkDetectionCamera extends StatefulWidget {
+//   final Function(String imagePath) onImageCaptured;
+//   final VoidCallback onCancel;
+
+//   const BlinkDetectionCamera({
+//     Key? key,
+//     required this.onImageCaptured,
+//     required this.onCancel,
+//   }) : super(key: key);
+
+//   @override
+//   _BlinkDetectionCameraState createState() => _BlinkDetectionCameraState();
+// }
+
+// class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> with SingleTickerProviderStateMixin {
+//   CameraController? _cameraController;
+//   late AnimationController _pulseController;
+//   late Animation<double> _pulseAnimation;
+
+//   final FaceDetector _faceDetector = FaceDetector(
+//     options: FaceDetectorOptions(
+//       enableClassification: true,
+//       enableLandmarks: true,
+//       performanceMode: FaceDetectorMode.fast,
+//       minFaceSize: 0.15,
+//     ),
+//   );
+
+//   bool _isProcessing = false;
+//   bool _isCameraInitialized = false;
+//   bool _isCapturing = false;
+
+//   String _instructionText = "Posisikan wajah Anda di dalam frame";
+//   Color _instructionColor = Colors.white;
+
+//   // BLINK DETECTION STATES
+//   bool? _leftOpenPrev;
+//   bool? _rightOpenPrev;
+
+//   bool _leftBlinkDetected = false;
+//   bool _rightBlinkDetected = false;
+
+//   int _leftBlinkCount = 0;
+//   int _rightBlinkCount = 0;
+
+//   DateTime? _lastProcess;
+//   DateTime? _faceDetectedTime;
+
+//   @override
+//   void initState() {
+//     super.initState();
+//     _pulseController = AnimationController(
+//       duration: const Duration(milliseconds: 1500),
+//       vsync: this,
+//     )..repeat(reverse: true);
+    
+//     _pulseAnimation = Tween<double>(begin: 1.0, end: 1.1).animate(
+//       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+//     );
+    
+//     _initCamera();
+//   }
+
+//   Future<void> _initCamera() async {
+//     try {
+//       final status = await Permission.camera.request();
+//       if (!status.isGranted) {
+//         if (mounted) {
+//           setState(() {
+//             _instructionText = "❌ Izin kamera ditolak!";
+//             _instructionColor = Colors.red;
+//           });
+//         }
+//         return;
+//       }
+
+//       final cameras = await availableCameras();
+//       if (cameras.isEmpty) {
+//         if (mounted) {
+//           setState(() {
+//             _instructionText = "❌ Tidak ada kamera tersedia";
+//             _instructionColor = Colors.red;
+//           });
+//         }
+//         return;
+//       }
+
+//       CameraDescription? frontCamera;
+//       try {
+//         frontCamera = cameras.firstWhere(
+//           (c) => c.lensDirection == CameraLensDirection.front,
+//         );
+//       } catch (e) {
+//         frontCamera = cameras.first;
+//       }
+
+//       debugPrint('📷 Using camera: ${frontCamera.name}');
+
+//       if (_cameraController != null) {
+//         await _cameraController!.dispose();
+//       }
+
+//       _cameraController = CameraController(
+//         frontCamera,
+//         ResolutionPreset.medium,
+//         enableAudio: false,
+//         imageFormatGroup: Platform.isAndroid 
+//             ? ImageFormatGroup.nv21 
+//             : ImageFormatGroup.bgra8888,
+//       );
+
+//       await _cameraController!.initialize().timeout(
+//         const Duration(seconds: 10),
+//         onTimeout: () {
+//           throw Exception('Camera initialization timeout');
+//         },
+//       );
+
+//       if (!mounted) {
+//         await _cameraController?.dispose();
+//         return;
+//       }
+
+//       setState(() => _isCameraInitialized = true);
+
+//       await Future.delayed(const Duration(milliseconds: 500));
+
+//       if (!mounted || _cameraController == null || !_cameraController!.value.isInitialized) {
+//         return;
+//       }
+
+//       await _cameraController!.startImageStream(_onImage);
+      
+//       debugPrint('✅ Camera initialized successfully');
+
+//     } catch (e) {
+//       debugPrint('❌ Camera initialization error: $e');
+//       if (mounted) {
+//         setState(() {
+//           _instructionText = "❌ Gagal membuka kamera: ${e.toString()}";
+//           _instructionColor = Colors.red;
+//         });
+//       }
+//     }
+//   }
+
+//   void _onImage(CameraImage image) {
+//     if (_isCapturing) return;
+
+//     final now = DateTime.now();
+//     if (_lastProcess != null &&
+//         now.difference(_lastProcess!).inMilliseconds < 150) {
+//       return;
+//     }
+//     _lastProcess = now;
+
+//     if (_isProcessing) return;
+//     _isProcessing = true;
+
+//     _detectFace(image);
+//   }
+
+//   Future<void> _detectFace(CameraImage image) async {
+//     try {
+//       final InputImage inputImage = _buildInputImage(image);
+//       final faces = await _faceDetector.processImage(inputImage);
+
+//       if (!mounted) return;
+
+//       if (faces.isEmpty) {
+//         _resetFaceState();
+//         return;
+//       }
+
+//       final face = faces.first;
+//       _faceDetectedTime ??= DateTime.now();
+
+//       final left = face.leftEyeOpenProbability ?? 0.5;
+//       final right = face.rightEyeOpenProbability ?? 0.5;
+
+//       _handleBlink(left, right);
+//     } catch (e) {
+//       debugPrint('Face detection error: $e');
+//     } finally {
+//       _isProcessing = false;
+//     }
+//   }
+
+//   InputImage _buildInputImage(CameraImage image) {
+//     final format = Platform.isAndroid 
+//         ? InputImageFormat.nv21 
+//         : InputImageFormat.bgra8888;
+
+//     final camera = _cameraController!.description;
+//     final sensorOrientation = camera.sensorOrientation;
+//     InputImageRotation? rotation;
+
+//     if (Platform.isAndroid) {
+//       rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
+//       if (rotation == null) {
+//         rotation = InputImageRotation.rotation0deg;
+//       }
+//     } else if (Platform.isIOS) {
+//       rotation = InputImageRotation.rotation270deg;
+//     }
+
+//     final metadata = InputImageMetadata(
+//       size: Size(image.width.toDouble(), image.height.toDouble()),
+//       rotation: rotation ?? InputImageRotation.rotation0deg,
+//       format: format,
+//       bytesPerRow: image.planes[0].bytesPerRow,
+//     );
+
+//     final WriteBuffer buffer = WriteBuffer();
+//     for (final Plane plane in image.planes) {
+//       buffer.putUint8List(plane.bytes);
+//     }
+//     final bytes = buffer.done().buffer.asUint8List();
+
+//     return InputImage.fromBytes(
+//       bytes: bytes,
+//       metadata: metadata,
+//     );
+//   }
+
+//   void _resetFaceState() {
+//     if (!mounted) return;
+    
+//     setState(() {
+//       _leftOpenPrev = null;
+//       _rightOpenPrev = null;
+//       _leftBlinkDetected = false;
+//       _rightBlinkDetected = false;
+//       _leftBlinkCount = 0;
+//       _rightBlinkCount = 0;
+//       _faceDetectedTime = null;
+//       _instructionText = "👤 Wajah tidak terdeteksi";
+//       _instructionColor = Colors.orange;
+//     });
+//   }
+
+//   void _handleBlink(double leftProb, double rightProb) {
+//     const double openThreshold = 0.5;
+//     const double closedThreshold = 0.4;
+
+//     bool leftOpen = leftProb > openThreshold;
+//     bool leftClosed = leftProb < closedThreshold;
+
+//     bool rightOpen = rightProb > openThreshold;
+//     bool rightClosed = rightProb < closedThreshold;
+
+//     if (_leftOpenPrev == null) {
+//       _leftOpenPrev = leftOpen;
+//       _rightOpenPrev = rightOpen;
+      
+//       setState(() {
+//         _instructionText = "👀 Wajah terdeteksi! Kedipkan mata Anda";
+//         _instructionColor = Colors.lightGreen;
+//       });
+//       return;
+//     }
+
+//     if (!_leftBlinkDetected) {
+//       if (_leftOpenPrev! && leftClosed) {
+//         _leftOpenPrev = false;
+//       } else if (!_leftOpenPrev! && leftOpen) {
+//         _leftBlinkDetected = true;
+//         _leftBlinkCount++;
+//         debugPrint('✅ LEFT eye blink detected! Count: $_leftBlinkCount');
+//       }
+//     }
+
+//     if (!_rightBlinkDetected) {
+//       if (_rightOpenPrev! && rightClosed) {
+//         _rightOpenPrev = false;
+//       } else if (!_rightOpenPrev! && rightOpen) {
+//         _rightBlinkDetected = true;
+//         _rightBlinkCount++;
+//         debugPrint('✅ RIGHT eye blink detected! Count: $_rightBlinkCount');
+//       }
+//     }
+
+//     if (leftOpen) _leftOpenPrev = true;
+//     if (rightOpen) _rightOpenPrev = true;
+
+//     if (!mounted) return;
+
+//     if (_leftBlinkDetected && _rightBlinkDetected) {
+//       setState(() {
+//         _instructionText = "✅ Kedipan terdeteksi! Mengambil foto...";
+//         _instructionColor = Colors.green;
+//       });
+
+//       _capturePhoto();
+//       return;
+//     }
+
+//     if (_leftBlinkDetected && !_rightBlinkDetected) {
+//       setState(() {
+//         _instructionText = "👁️ Mata kiri OK! Kedipkan mata kanan";
+//         _instructionColor = Colors.amber;
+//       });
+//     } else if (!_leftBlinkDetected && _rightBlinkDetected) {
+//       setState(() {
+//         _instructionText = "👁️ Mata kanan OK! Kedipkan mata kiri";
+//         _instructionColor = Colors.amber;
+//       });
+//     } else {
+//       setState(() {
+//         _instructionText = "👀 Kedipkan kedua mata Anda";
+//         _instructionColor = Colors.white;
+//       });
+//     }
+//   }
+
+//   Future<void> _capturePhoto() async {
+//     if (_cameraController == null || _isCapturing || !_cameraController!.value.isInitialized) {
+//       return;
+//     }
+
+//     _isCapturing = true;
+
+//     try {
+//       if (_cameraController!.value.isStreamingImages) {
+//         await _cameraController!.stopImageStream();
+//       }
+
+//       await Future.delayed(const Duration(milliseconds: 300));
+
+//       if (!mounted || _cameraController == null) return;
+
+//       final XFile file = await _cameraController!.takePicture();
+
+//       debugPrint('📸 Picture taken: ${file.path}');
+
+//       final dir = await getTemporaryDirectory();
+//       final newPath = "${dir.path}/face_${DateTime.now().millisecondsSinceEpoch}.jpg";
+
+//       final File sourceFile = File(file.path);
+//       if (await sourceFile.exists()) {
+//         await sourceFile.copy(newPath);
+//         debugPrint('✅ Photo saved: $newPath');
+
+//         if (mounted) {
+//           widget.onImageCaptured(newPath);
+//         }
+//       } else {
+//         throw Exception('Source file does not exist');
+//       }
+
+//     } catch (e) {
+//       debugPrint('❌ Capture error: $e');
+      
+//       if (mounted) {
+//         setState(() {
+//           _instructionText = "❌ Gagal mengambil foto. Coba lagi.";
+//           _instructionColor = Colors.red;
+//           _isCapturing = false;
+//         });
+
+//         await Future.delayed(const Duration(seconds: 2));
+
+//         if (mounted && _cameraController != null) {
+//           _resetFaceState();
+          
+//           try {
+//             if (!_cameraController!.value.isStreamingImages) {
+//               await _cameraController!.startImageStream(_onImage);
+//             }
+//           } catch (restartError) {
+//             debugPrint('Failed to restart stream: $restartError');
+//           }
+//         }
+//       }
+//     }
+//   }
+
+//   @override
+//   void dispose() {
+//     debugPrint('🔚 Disposing camera resources');
+//     _pulseController.dispose();
+//     _cameraController?.dispose();
+//     _faceDetector.close();
+//     super.dispose();
+//   }
+
+//   @override
+//   Widget build(BuildContext context) {
+//     if (!_isCameraInitialized) {
+//       return Scaffold(
+//         backgroundColor: Colors.black,
+//         body: Center(
+//           child: Column(
+//             mainAxisAlignment: MainAxisAlignment.center,
+//             children: [
+//               // Modern loading spinner
+//               Stack(
+//                 alignment: Alignment.center,
+//                 children: [
+//                   SizedBox(
+//                     width: 80,
+//                     height: 80,
+//                     child: CircularProgressIndicator(
+//                       color: Colors.blue.shade400,
+//                       strokeWidth: 3,
+//                     ),
+//                   ),
+//                   Icon(
+//                     Icons.camera_alt_rounded,
+//                     color: Colors.blue.shade400,
+//                     size: 40,
+//                   ),
+//                 ],
+//               ),
+//               const SizedBox(height: 24),
+//               Text(
+//                 'Memuat Kamera',
+//                 style: TextStyle(
+//                   color: Colors.white,
+//                   fontSize: 20,
+//                   fontWeight: FontWeight.bold,
+//                   letterSpacing: 0.5,
+//                 ),
+//               ),
+//               const SizedBox(height: 8),
+//               Text(
+//                 'Mohon tunggu sebentar...',
+//                 style: TextStyle(
+//                   color: Colors.grey.shade400,
+//                   fontSize: 14,
+//                 ),
+//               ),
+//             ],
+//           ),
+//         ),
+//       );
+//     }
+
+//     return Scaffold(
+//       backgroundColor: Colors.black,
+//       body: Stack(
+//         children: [
+//           // Camera Preview with gradient overlay
+//           Positioned.fill(
+//             child: Stack(
+//               children: [
+//                 CameraPreview(_cameraController!),
+//                 // Top gradient
+//                 Positioned(
+//                   top: 0,
+//                   left: 0,
+//                   right: 0,
+//                   child: Container(
+//                     height: 200,
+//                     decoration: BoxDecoration(
+//                       gradient: LinearGradient(
+//                         begin: Alignment.topCenter,
+//                         end: Alignment.bottomCenter,
+//                         colors: [
+//                           Colors.black.withOpacity(0.7),
+//                           Colors.transparent,
+//                         ],
+//                       ),
+//                     ),
+//                   ),
+//                 ),
+//                 // Bottom gradient
+//                 Positioned(
+//                   bottom: 0,
+//                   left: 0,
+//                   right: 0,
+//                   child: Container(
+//                     height: 200,
+//                     decoration: BoxDecoration(
+//                       gradient: LinearGradient(
+//                         begin: Alignment.bottomCenter,
+//                         end: Alignment.topCenter,
+//                         colors: [
+//                           Colors.black.withOpacity(0.7),
+//                           Colors.transparent,
+//                         ],
+//                       ),
+//                     ),
+//                   ),
+//                 ),
+//               ],
+//             ),
+//           ),
+
+//           // Animated Face Oval Guide
+//           Positioned.fill(
+//             child: AnimatedBuilder(
+//               animation: _pulseAnimation,
+//               builder: (context, child) {
+//                 return CustomPaint(
+//                   painter: _ModernFaceOvalPainter(
+//                     color: _instructionColor,
+//                     isCapturing: _isCapturing,
+//                     faceDetected: _faceDetectedTime != null,
+//                     pulseScale: _pulseAnimation.value,
+//                   ),
+//                 );
+//               },
+//             ),
+//           ),
+
+//           // Modern Header with Instruction
+//           Positioned(
+//             top: 0,
+//             left: 0,
+//             right: 0,
+//             child: SafeArea(
+//               child: Padding(
+//                 padding: const EdgeInsets.all(20.0),
+//                 child: Column(
+//                   children: [
+//                     // Title
+//                     Text(
+//                       'Verifikasi Wajah',
+//                       style: TextStyle(
+//                         color: Colors.white,
+//                         fontSize: 24,
+//                         fontWeight: FontWeight.bold,
+//                         letterSpacing: 0.5,
+//                         shadows: [
+//                           Shadow(
+//                             color: Colors.black.withOpacity(0.5),
+//                             blurRadius: 10,
+//                           ),
+//                         ],
+//                       ),
+//                     ),
+//                     const SizedBox(height: 16),
+                    
+//                     // Instruction Card
+//                     Container(
+//                       padding: const EdgeInsets.symmetric(
+//                         vertical: 16,
+//                         horizontal: 24,
+//                       ),
+//                       decoration: BoxDecoration(
+//                         color: Colors.black.withOpacity(0.6),
+//                         borderRadius: BorderRadius.circular(20),
+//                         border: Border.all(
+//                           color: _instructionColor.withOpacity(0.5),
+//                           width: 2,
+//                         ),
+//                         boxShadow: [
+//                           BoxShadow(
+//                             color: _instructionColor.withOpacity(0.2),
+//                             blurRadius: 20,
+//                             spreadRadius: 2,
+//                           ),
+//                         ],
+//                       ),
+//                       child: Row(
+//                         mainAxisSize: MainAxisSize.min,
+//                         children: [
+//                           Container(
+//                             padding: const EdgeInsets.all(8),
+//                             decoration: BoxDecoration(
+//                               color: _instructionColor.withOpacity(0.2),
+//                               shape: BoxShape.circle,
+//                             ),
+//                             child: Icon(
+//                               _getInstructionIcon(),
+//                               color: _instructionColor,
+//                               size: 24,
+//                             ),
+//                           ),
+//                           const SizedBox(width: 16),
+//                           Flexible(
+//                             child: Text(
+//                               _instructionText,
+//                               textAlign: TextAlign.center,
+//                               style: TextStyle(
+//                                 color: Colors.white,
+//                                 fontSize: 16,
+//                                 fontWeight: FontWeight.w600,
+//                                 letterSpacing: 0.3,
+//                               ),
+//                             ),
+//                           ),
+//                         ],
+//                       ),
+//                     ),
+//                   ],
+//                 ),
+//               ),
+//             ),
+//           ),
+
+//           // Modern Blink Status Indicators
+//           if (_faceDetectedTime != null)
+//             Positioned(
+//               top: MediaQuery.of(context).size.height * 0.35,
+//               left: 0,
+//               right: 0,
+//               child: Row(
+//                 mainAxisAlignment: MainAxisAlignment.center,
+//                 children: [
+//                   _buildModernBlinkIndicator(
+//                     'Kiri',
+//                     _leftBlinkDetected,
+//                     Icons.visibility,
+//                   ),
+//                   const SizedBox(width: 24),
+//                   _buildModernBlinkIndicator(
+//                     'Kanan',
+//                     _rightBlinkDetected,
+//                     Icons.visibility,
+//                   ),
+//                 ],
+//               ),
+//             ),
+
+//           // Modern Cancel Button
+//           Positioned(
+//             bottom: 0,
+//             left: 0,
+//             right: 0,
+//             child: SafeArea(
+//               child: Padding(
+//                 padding: const EdgeInsets.all(24.0),
+//                 child: Container(
+//                   decoration: BoxDecoration(
+//                     borderRadius: BorderRadius.circular(30),
+//                     boxShadow: [
+//                       BoxShadow(
+//                         color: Colors.black.withOpacity(0.3),
+//                         blurRadius: 20,
+//                         spreadRadius: 2,
+//                       ),
+//                     ],
+//                   ),
+//                   child: ElevatedButton.icon(
+//                     onPressed: _isCapturing ? null : widget.onCancel,
+//                     icon: const Icon(Icons.close_rounded, size: 24),
+//                     label: const Text(
+//                       "Batalkan",
+//                       style: TextStyle(
+//                         fontSize: 16,
+//                         fontWeight: FontWeight.bold,
+//                         letterSpacing: 0.5,
+//                       ),
+//                     ),
+//                     style: ElevatedButton.styleFrom(
+//                       backgroundColor: Colors.red.shade600,
+//                       foregroundColor: Colors.white,
+//                       disabledBackgroundColor: Colors.grey.shade700,
+//                       padding: const EdgeInsets.symmetric(
+//                         horizontal: 32,
+//                         vertical: 16,
+//                       ),
+//                       shape: RoundedRectangleBorder(
+//                         borderRadius: BorderRadius.circular(30),
+//                       ),
+//                       elevation: 0,
+//                     ),
+//                   ),
+//                 ),
+//               ),
+//             ),
+//           ),
+
+//           // Modern Capturing Overlay
+//           if (_isCapturing)
+//             Positioned.fill(
+//               child: Container(
+//                 decoration: BoxDecoration(
+//                   gradient: LinearGradient(
+//                     begin: Alignment.topCenter,
+//                     end: Alignment.bottomCenter,
+//                     colors: [
+//                       Colors.black.withOpacity(0.8),
+//                       Colors.black.withOpacity(0.9),
+//                     ],
+//                   ),
+//                 ),
+//                 child: Center(
+//                   child: Column(
+//                     mainAxisAlignment: MainAxisAlignment.center,
+//                     children: [
+//                       // Success icon animation
+//                       Container(
+//                         padding: const EdgeInsets.all(20),
+//                         decoration: BoxDecoration(
+//                           color: Colors.green.withOpacity(0.2),
+//                           shape: BoxShape.circle,
+//                           border: Border.all(
+//                             color: Colors.green,
+//                             width: 3,
+//                           ),
+//                         ),
+//                         child: const Icon(
+//                           Icons.check_circle_rounded,
+//                           color: Colors.green,
+//                           size: 60,
+//                         ),
+//                       ),
+//                       const SizedBox(height: 32),
+                      
+//                       // Loading spinner
+//                       SizedBox(
+//                         width: 60,
+//                         height: 60,
+//                         child: CircularProgressIndicator(
+//                           color: Colors.green,
+//                           strokeWidth: 4,
+//                         ),
+//                       ),
+//                       const SizedBox(height: 24),
+                      
+//                       Text(
+//                         'Memproses Foto',
+//                         style: TextStyle(
+//                           color: Colors.white,
+//                           fontSize: 22,
+//                           fontWeight: FontWeight.bold,
+//                           letterSpacing: 0.5,
+//                         ),
+//                       ),
+//                       const SizedBox(height: 8),
+//                       Text(
+//                         'Mohon tunggu sebentar...',
+//                         style: TextStyle(
+//                           color: Colors.grey.shade400,
+//                           fontSize: 14,
+//                         ),
+//                       ),
+//                     ],
+//                   ),
+//                 ),
+//               ),
+//             ),
+//         ],
+//       ),
+//     );
+//   }
+
+//   IconData _getInstructionIcon() {
+//     if (_isCapturing) return Icons.check_circle_rounded;
+//     if (_faceDetectedTime != null) {
+//       if (_leftBlinkDetected && _rightBlinkDetected) {
+//         return Icons.check_circle_rounded;
+//       }
+//       return Icons.visibility_rounded;
+//     }
+//     return Icons.face_rounded;
+//   }
+
+//   Widget _buildModernBlinkIndicator(String label, bool detected, IconData icon) {
+//     return AnimatedContainer(
+//       duration: const Duration(milliseconds: 300),
+//       curve: Curves.easeInOut,
+//       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+//       decoration: BoxDecoration(
+//         color: detected
+//             ? Colors.green.withOpacity(0.9)
+//             : Colors.black.withOpacity(0.6),
+//         borderRadius: BorderRadius.circular(25),
+//         border: Border.all(
+//           color: detected ? Colors.green : Colors.white.withOpacity(0.3),
+//           width: 2,
+//         ),
+//         boxShadow: detected ? [
+//           BoxShadow(
+//             color: Colors.green.withOpacity(0.4),
+//             blurRadius: 15,
+//             spreadRadius: 2,
+//           ),
+//         ] : [],
+//       ),
+//       child: Row(
+//         mainAxisSize: MainAxisSize.min,
+//         children: [
+//           AnimatedSwitcher(
+//             duration: const Duration(milliseconds: 300),
+//             child: Icon(
+//               detected ? Icons.check_circle_rounded : icon,
+//               color: Colors.white,
+//               size: 22,
+//               key: ValueKey(detected),
+//             ),
+//           ),
+//           const SizedBox(width: 10),
+//           Text(
+//             label,
+//             style: const TextStyle(
+//               color: Colors.white,
+//               fontWeight: FontWeight.bold,
+//               fontSize: 15,
+//               letterSpacing: 0.3,
+//             ),
+//           ),
+//         ],
+//       ),
+//     );
+//   }
+// }
+
+// // Modern Custom painter for face oval guide
+// class _ModernFaceOvalPainter extends CustomPainter {
+//   final Color color;
+//   final bool isCapturing;
+//   final bool faceDetected;
+//   final double pulseScale;
+
+//   _ModernFaceOvalPainter({
+//     required this.color,
+//     required this.isCapturing,
+//     required this.faceDetected,
+//     required this.pulseScale,
+//   });
+
+//   @override
+//   void paint(Canvas canvas, Size size) {
+//     final center = Offset(size.width / 2, size.height / 2.5);
+//     final radiusX = size.width * 0.35 * (faceDetected ? pulseScale : 1.0);
+//     final radiusY = size.height * 0.25 * (faceDetected ? pulseScale : 1.0);
+
+//     // Draw outer glow
+//     if (faceDetected) {
+//       final glowPaint = Paint()
+//         ..color = color.withOpacity(0.2)
+//         ..style = PaintingStyle.stroke
+//         ..strokeWidth = 8.0
+//         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
+
+//       canvas.drawOval(
+//         Rect.fromCenter(
+//           center: center,
+//           width: radiusX * 2,
+//           height: radiusY * 2,
+//         ),
+//         glowPaint,
+//       );
+//     }
+
+//     // Draw main oval with dashed effect
+//     final paint = Paint()
+//       ..color = isCapturing ? Colors.green : color
+//       ..style = PaintingStyle.stroke
+//       ..strokeWidth = 4.0;
+
+//     final rect = Rect.fromCenter(
+//       center: center,
+//       width: radiusX * 2,
+//       height: radiusY * 2,
+//     );
+
+//     // Draw dashed oval
+//     const dashWidth = 15.0;
+//     const dashSpace = 8.0;
+//     double distance = 0.0;
+
+//     final path = Path()..addOval(rect);
+//     final pathMetrics = path.computeMetrics();
+
+//     for (final pathMetric in pathMetrics) {
+//       while (distance < pathMetric.length) {
+//         final extractPath = pathMetric.extractPath(
+//           distance,
+//           distance + dashWidth,
+//         );
+//         canvas.drawPath(extractPath, paint);
+//         distance += dashWidth + dashSpace;
+//       }
+//     }
+
+//     // Draw corner indicators
+//     _drawCornerIndicators(canvas, rect, paint);
+//   }
+
+//   void _drawCornerIndicators(Canvas canvas, Rect rect, Paint paint) {
+//     final cornerPaint = Paint()
+//       ..color = paint.color
+//       ..style = PaintingStyle.stroke
+//       ..strokeWidth = 5.0
+//       ..strokeCap = StrokeCap.round;
+
+//     const cornerSize = 25.0;
+
+//     // Top left
+//     canvas.drawLine(
+//       Offset(rect.left - 10, rect.top),
+//       Offset(rect.left - 10 + cornerSize, rect.top),
+//       cornerPaint,
+//     );
+//     canvas.drawLine(
+//       Offset(rect.left - 10, rect.top),
+//       Offset(rect.left - 10, rect.top + cornerSize),
+//       cornerPaint,
+//     );
+
+//     // Top right
+//     canvas.drawLine(
+//       Offset(rect.right + 10, rect.top),
+//       Offset(rect.right + 10 - cornerSize, rect.top),
+//       cornerPaint,
+//     );
+//     canvas.drawLine(
+//       Offset(rect.right + 10, rect.top),
+//       Offset(rect.right + 10, rect.top + cornerSize),
+//       cornerPaint,
+//     );
+
+//     // Bottom left
+//     canvas.drawLine(
+//       Offset(rect.left - 10, rect.bottom),
+//       Offset(rect.left - 10 + cornerSize, rect.bottom),
+//       cornerPaint,
+//     );
+//     canvas.drawLine(
+//       Offset(rect.left - 10, rect.bottom),
+//       Offset(rect.left - 10, rect.bottom - cornerSize),
+//       cornerPaint,
+//     );
+
+//     // Bottom right
+//     canvas.drawLine(
+//       Offset(rect.right + 10, rect.bottom),
+//       Offset(rect.right + 10 - cornerSize, rect.bottom),
+//       cornerPaint,
+//     );
+//     canvas.drawLine(
+//       Offset(rect.right + 10, rect.bottom),
+//       Offset(rect.right + 10, rect.bottom - cornerSize),
+//       cornerPaint,
+//     );
+//   }
+
+//   @override
+//   bool shouldRepaint(_ModernFaceOvalPainter oldDelegate) {
+//     return oldDelegate.color != color || 
+//            oldDelegate.isCapturing != isCapturing ||
+//            oldDelegate.faceDetected != faceDetected ||
+//            oldDelegate.pulseScale != pulseScale;
+//   }
+// }
+
 // lib/widgets/blink_detection_camera.dart
 import 'dart:async';
 import 'dart:io';
@@ -22,8 +973,10 @@ class BlinkDetectionCamera extends StatefulWidget {
   _BlinkDetectionCameraState createState() => _BlinkDetectionCameraState();
 }
 
-class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
+class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> with SingleTickerProviderStateMixin {
   CameraController? _cameraController;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
 
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
@@ -36,13 +989,13 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
 
   bool _isProcessing = false;
   bool _isCameraInitialized = false;
-  bool _isCapturing = false; // Prevent multiple captures
+  bool _isCapturing = false;
 
-  String _instructionText = "Posisikan wajah Anda di dalam frame";
-  Color _instructionColor = Colors.white;
+  String _instructionText = "Posisikan wajah Anda di dalam lingkaran"; // Diubah instruksinya
+  Color _instructionColor = Colors.blueAccent; // Warna default yang lebih modern
 
   // BLINK DETECTION STATES
-  bool? _leftOpenPrev; // null = not initialized
+  bool? _leftOpenPrev;
   bool? _rightOpenPrev;
 
   bool _leftBlinkDetected = false;
@@ -57,36 +1010,42 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
   @override
   void initState() {
     super.initState();
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 1200), // Durasi pulse sedikit lebih cepat
+      vsync: this,
+    )..repeat(reverse: true);
+    
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.04).animate( // Pulse lebih halus
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    
     _initCamera();
   }
 
   Future<void> _initCamera() async {
     try {
-      // Request camera permission
       final status = await Permission.camera.request();
       if (!status.isGranted) {
         if (mounted) {
           setState(() {
             _instructionText = "❌ Izin kamera ditolak!";
-            _instructionColor = Colors.red;
+            _instructionColor = Colors.redAccent;
           });
         }
         return;
       }
 
-      // Get available cameras
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
         if (mounted) {
           setState(() {
             _instructionText = "❌ Tidak ada kamera tersedia";
-            _instructionColor = Colors.red;
+            _instructionColor = Colors.redAccent;
           });
         }
         return;
       }
 
-      // Find front camera
       CameraDescription? frontCamera;
       try {
         frontCamera = cameras.firstWhere(
@@ -98,20 +1057,19 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
 
       debugPrint('📷 Using camera: ${frontCamera.name}');
 
-      // Dispose previous controller if exists
       if (_cameraController != null) {
         await _cameraController!.dispose();
       }
 
-      // Initialize camera controller
       _cameraController = CameraController(
         frontCamera,
         ResolutionPreset.medium,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
+        imageFormatGroup: Platform.isAndroid 
+            ? ImageFormatGroup.nv21 
+            : ImageFormatGroup.bgra8888,
       );
 
-      // Initialize with error handling
       await _cameraController!.initialize().timeout(
         const Duration(seconds: 10),
         onTimeout: () {
@@ -126,14 +1084,12 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
 
       setState(() => _isCameraInitialized = true);
 
-      // Small delay before starting image stream
       await Future.delayed(const Duration(milliseconds: 500));
 
       if (!mounted || _cameraController == null || !_cameraController!.value.isInitialized) {
         return;
       }
 
-      // Start image stream
       await _cameraController!.startImageStream(_onImage);
       
       debugPrint('✅ Camera initialized successfully');
@@ -143,16 +1099,15 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
       if (mounted) {
         setState(() {
           _instructionText = "❌ Gagal membuka kamera: ${e.toString()}";
-          _instructionColor = Colors.red;
+          _instructionColor = Colors.redAccent;
         });
       }
     }
   }
 
   void _onImage(CameraImage image) {
-    if (_isCapturing) return; // Don't process if already capturing
+    if (_isCapturing) return;
 
-    // Limit processing to every 150ms for performance
     final now = DateTime.now();
     if (_lastProcess != null &&
         now.difference(_lastProcess!).inMilliseconds < 150) {
@@ -168,25 +1123,8 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
 
   Future<void> _detectFace(CameraImage image) async {
     try {
-      final WriteBuffer buffer = WriteBuffer();
-      for (final Plane p in image.planes) {
-        buffer.putUint8List(p.bytes);
-      }
-      final bytes = buffer.done().buffer.asUint8List();
-
-      final rotation = InputImageRotation.rotation270deg;
-
-      final input = InputImage.fromBytes(
-        bytes: bytes,
-        metadata: InputImageMetadata(
-          size: Size(image.width.toDouble(), image.height.toDouble()),
-          rotation: rotation,
-          format: InputImageFormat.yuv420,
-          bytesPerRow: image.planes[0].bytesPerRow,
-        ),
-      );
-
-      final faces = await _faceDetector.processImage(input);
+      final InputImage inputImage = _buildInputImage(image);
+      final faces = await _faceDetector.processImage(inputImage);
 
       if (!mounted) return;
 
@@ -196,8 +1134,6 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
       }
 
       final face = faces.first;
-
-      // Mark face detected
       _faceDetectedTime ??= DateTime.now();
 
       final left = face.leftEyeOpenProbability ?? 0.5;
@@ -209,6 +1145,43 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
     } finally {
       _isProcessing = false;
     }
+  }
+
+  InputImage _buildInputImage(CameraImage image) {
+    final format = Platform.isAndroid 
+        ? InputImageFormat.nv21 
+        : InputImageFormat.bgra8888;
+
+    final camera = _cameraController!.description;
+    final sensorOrientation = camera.sensorOrientation;
+    InputImageRotation? rotation;
+
+    if (Platform.isAndroid) {
+      rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
+      if (rotation == null) {
+        rotation = InputImageRotation.rotation0deg;
+      }
+    } else if (Platform.isIOS) {
+      rotation = InputImageRotation.rotation270deg;
+    }
+
+    final metadata = InputImageMetadata(
+      size: Size(image.width.toDouble(), image.height.toDouble()),
+      rotation: rotation ?? InputImageRotation.rotation0deg,
+      format: format,
+      bytesPerRow: image.planes[0].bytesPerRow,
+    );
+
+    final WriteBuffer buffer = WriteBuffer();
+    for (final Plane plane in image.planes) {
+      buffer.putUint8List(plane.bytes);
+    }
+    final bytes = buffer.done().buffer.asUint8List();
+
+    return InputImage.fromBytes(
+      bytes: bytes,
+      metadata: metadata,
+    );
   }
 
   void _resetFaceState() {
@@ -223,14 +1196,13 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
       _rightBlinkCount = 0;
       _faceDetectedTime = null;
       _instructionText = "👤 Wajah tidak terdeteksi";
-      _instructionColor = Colors.orange;
+      _instructionColor = Colors.deepOrangeAccent; // Warna orange yang lebih gelap
     });
   }
 
   void _handleBlink(double leftProb, double rightProb) {
-    // Adjusted thresholds for better detection
-    const double openThreshold = 0.5;   // Was 0.6
-    const double closedThreshold = 0.4; // Was 0.3
+    const double openThreshold = 0.5;
+    const double closedThreshold = 0.4;
 
     bool leftOpen = leftProb > openThreshold;
     bool leftClosed = leftProb < closedThreshold;
@@ -238,77 +1210,66 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
     bool rightOpen = rightProb > openThreshold;
     bool rightClosed = rightProb < closedThreshold;
 
-    // Initialize on first detection
     if (_leftOpenPrev == null) {
       _leftOpenPrev = leftOpen;
       _rightOpenPrev = rightOpen;
       
       setState(() {
         _instructionText = "👀 Wajah terdeteksi! Kedipkan mata Anda";
-        _instructionColor = Colors.lightGreen;
+        _instructionColor = Colors.lightGreenAccent; // Warna hijau yang lebih terang
       });
       return;
     }
 
-    // Detect LEFT eye blink (OPEN → CLOSED → OPEN)
     if (!_leftBlinkDetected) {
       if (_leftOpenPrev! && leftClosed) {
-        // Eye closed
         _leftOpenPrev = false;
       } else if (!_leftOpenPrev! && leftOpen) {
-        // Eye reopened = BLINK COMPLETE
         _leftBlinkDetected = true;
         _leftBlinkCount++;
         debugPrint('✅ LEFT eye blink detected! Count: $_leftBlinkCount');
       }
     }
 
-    // Detect RIGHT eye blink (OPEN → CLOSED → OPEN)
     if (!_rightBlinkDetected) {
       if (_rightOpenPrev! && rightClosed) {
-        // Eye closed
         _rightOpenPrev = false;
       } else if (!_rightOpenPrev! && rightOpen) {
-        // Eye reopened = BLINK COMPLETE
         _rightBlinkDetected = true;
         _rightBlinkCount++;
         debugPrint('✅ RIGHT eye blink detected! Count: $_rightBlinkCount');
       }
     }
 
-    // Update previous states
     if (leftOpen) _leftOpenPrev = true;
     if (rightOpen) _rightOpenPrev = true;
 
-    // Update UI based on blink status
     if (!mounted) return;
 
     if (_leftBlinkDetected && _rightBlinkDetected) {
       setState(() {
         _instructionText = "✅ Kedipan terdeteksi! Mengambil foto...";
-        _instructionColor = Colors.green;
+        _instructionColor = Colors.greenAccent; // Warna hijau yang lebih cerah
       });
 
-      // Trigger photo capture
       _capturePhoto();
       return;
     }
 
-    // Show progress
     if (_leftBlinkDetected && !_rightBlinkDetected) {
       setState(() {
         _instructionText = "👁️ Mata kiri OK! Kedipkan mata kanan";
-        _instructionColor = Colors.amber;
+        _instructionColor = Colors.amberAccent; // Warna amber yang lebih cerah
       });
     } else if (!_leftBlinkDetected && _rightBlinkDetected) {
       setState(() {
         _instructionText = "👁️ Mata kanan OK! Kedipkan mata kiri";
-        _instructionColor = Colors.amber;
+        _instructionColor = Colors.amberAccent;
       });
     } else {
       setState(() {
         _instructionText = "👀 Kedipkan kedua mata Anda";
-        _instructionColor = Colors.white;
+        _instructionColor = Colors.blueAccent; // Kembali ke warna default yang modern
       });
     }
   }
@@ -318,25 +1279,21 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
       return;
     }
 
-    _isCapturing = true; // Prevent multiple captures
+    _isCapturing = true;
 
     try {
-      // Stop image stream before capture
       if (_cameraController!.value.isStreamingImages) {
         await _cameraController!.stopImageStream();
       }
 
-      // Wait for camera to stabilize
       await Future.delayed(const Duration(milliseconds: 300));
 
       if (!mounted || _cameraController == null) return;
 
-      // Take picture
       final XFile file = await _cameraController!.takePicture();
 
       debugPrint('📸 Picture taken: ${file.path}');
 
-      // Get temp directory and copy file
       final dir = await getTemporaryDirectory();
       final newPath = "${dir.path}/face_${DateTime.now().millisecondsSinceEpoch}.jpg";
 
@@ -345,7 +1302,6 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
         await sourceFile.copy(newPath);
         debugPrint('✅ Photo saved: $newPath');
 
-        // Return the captured image path
         if (mounted) {
           widget.onImageCaptured(newPath);
         }
@@ -359,11 +1315,10 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
       if (mounted) {
         setState(() {
           _instructionText = "❌ Gagal mengambil foto. Coba lagi.";
-          _instructionColor = Colors.red;
+          _instructionColor = Colors.redAccent;
           _isCapturing = false;
         });
 
-        // Wait a bit then reset and restart
         await Future.delayed(const Duration(seconds: 2));
 
         if (mounted && _cameraController != null) {
@@ -384,6 +1339,7 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
   @override
   void dispose() {
     debugPrint('🔚 Disposing camera resources');
+    _pulseController.dispose();
     _cameraController?.dispose();
     _faceDetector.close();
     super.dispose();
@@ -392,17 +1348,48 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
   @override
   Widget build(BuildContext context) {
     if (!_isCameraInitialized) {
-      return const Scaffold(
-        backgroundColor: Colors.black,
+      return Scaffold(
+        backgroundColor: Colors.grey[900], // Background lebih gelap
         body: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              CircularProgressIndicator(color: Colors.white),
-              SizedBox(height: 20),
+              // Modern loading spinner
+              Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox(
+                    width: 80,
+                    height: 80,
+                    child: CircularProgressIndicator(
+                      color: Colors.blueAccent, // Warna spinner lebih modern
+                      strokeWidth: 3,
+                    ),
+                  ),
+                  Icon(
+                    Icons.camera_alt_rounded,
+                    color: Colors.blueAccent,
+                    size: 40,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
               Text(
-                'Memuat kamera...',
-                style: TextStyle(color: Colors.white, fontSize: 16),
+                'Memuat Kamera',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Mohon tunggu sebentar...',
+                style: TextStyle(
+                  color: Colors.grey.shade400,
+                  fontSize: 14,
+                ),
               ),
             ],
           ),
@@ -414,113 +1401,294 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Camera Preview
+          // Camera Preview with gradient overlay
           Positioned.fill(
-            child: CameraPreview(_cameraController!),
-          ),
-
-          // Face Oval Guide
-          Positioned.fill(
-            child: CustomPaint(
-              painter: _FaceOvalPainter(
-                color: _instructionColor,
-                isCapturing: _isCapturing,
-              ),
+            child: Stack(
+              children: [
+                _cameraController!.value.isInitialized 
+                  ? CameraPreview(_cameraController!)
+                  : Container(color: Colors.black), // Fallback jika kamera belum siap
+                // Top gradient
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    height: 200,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.black.withOpacity(0.8), // Opacity lebih tinggi
+                          Colors.transparent,
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                // Bottom gradient
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    height: 200,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.bottomCenter,
+                        end: Alignment.topCenter,
+                        colors: [
+                          Colors.black.withOpacity(0.8), // Opacity lebih tinggi
+                          Colors.transparent,
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
 
-          // Instruction Text
+          // Animated Face Circle Guide
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: _pulseAnimation,
+              builder: (context, child) {
+                return CustomPaint(
+                  painter: _ModernFaceCirclePainter( // Diubah ke Circle Painter
+                    color: _instructionColor,
+                    isCapturing: _isCapturing,
+                    faceDetected: _faceDetectedTime != null,
+                    pulseScale: _pulseAnimation.value,
+                  ),
+                );
+              },
+            ),
+          ),
+
+          // Modern Header with Instruction
           Positioned(
-            top: 80,
-            left: 20,
-            right: 20,
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.7),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                _instructionText,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: _instructionColor,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  children: [
+                    // Title
+                    Text(
+                      'Verifikasi Wajah',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5,
+                        shadows: [
+                          Shadow(
+                            color: Colors.black.withOpacity(0.5),
+                            blurRadius: 10,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    
+                    // Instruction Card
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 16,
+                        horizontal: 24,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.6),
+                        borderRadius: BorderRadius.circular(15), // Sudut sedikit membulat
+                        border: Border.all(
+                          color: _instructionColor.withOpacity(0.5),
+                          width: 2,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _instructionColor.withOpacity(0.2),
+                            blurRadius: 15, // Blur sedikit berkurang
+                            spreadRadius: 1, // Spread berkurang
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: _instructionColor.withOpacity(0.2),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              _getInstructionIcon(),
+                              color: _instructionColor,
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Flexible(
+                            child: Text(
+                              _instructionText,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.3,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
           ),
 
-          // Blink Status Indicators
+          // Modern Blink Status Indicators (Gaya disederhanakan)
           if (_faceDetectedTime != null)
             Positioned(
-              top: 150,
+              top: MediaQuery.of(context).size.height * 0.35,
               left: 0,
               right: 0,
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _buildBlinkIndicator(
-                    'Mata Kiri',
+                  _buildModernBlinkIndicator(
+                    'Kiri',
                     _leftBlinkDetected,
-                    Icons.visibility,
+                    Icons.remove_red_eye_rounded, // Ikon mata yang lebih modern
                   ),
-                  const SizedBox(width: 30),
-                  _buildBlinkIndicator(
-                    'Mata Kanan',
+                  const SizedBox(width: 24),
+                  _buildModernBlinkIndicator(
+                    'Kanan',
                     _rightBlinkDetected,
-                    Icons.visibility,
+                    Icons.remove_red_eye_rounded,
                   ),
                 ],
               ),
             ),
 
-          // Cancel Button
+          // Modern Cancel Button
           Positioned(
-            bottom: 50,
+            bottom: 0,
             left: 0,
             right: 0,
-            child: Center(
-              child: ElevatedButton.icon(
-                onPressed: _isCapturing ? null : widget.onCancel,
-                icon: const Icon(Icons.close),
-                label: const Text("Batal"),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  disabledBackgroundColor: Colors.grey,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 30,
-                    vertical: 15,
-                  ),
-                  shape: RoundedRectangleBorder(
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Container(
+                  decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(30),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.3),
+                        blurRadius: 20,
+                        spreadRadius: 2,
+                      ),
+                    ],
+                  ),
+                  child: ElevatedButton.icon(
+                    onPressed: _isCapturing ? null : widget.onCancel,
+                    icon: const Icon(Icons.close_rounded, size: 24),
+                    label: const Text(
+                      "Batalkan",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent.shade700, // Warna merah yang lebih pekat
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: Colors.grey.shade700,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 32,
+                        vertical: 16,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                      elevation: 0,
+                    ),
                   ),
                 ),
               ),
             ),
           ),
 
-          // Capturing Overlay
+          // Modern Capturing Overlay
           if (_isCapturing)
             Positioned.fill(
               child: Container(
-                color: Colors.black.withOpacity(0.5),
-                child: const Center(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withOpacity(0.9), // Opacity lebih tinggi
+                      Colors.black.withOpacity(0.95),
+                    ],
+                  ),
+                ),
+                child: Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 3,
+                      // Success icon animation
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: Colors.green.withOpacity(0.2),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: Colors.greenAccent, // Warna hijau yang lebih cerah
+                            width: 3,
+                          ),
+                        ),
+                        child: const Icon(
+                          Icons.check_circle_rounded,
+                          color: Colors.greenAccent,
+                          size: 60,
+                        ),
                       ),
-                      SizedBox(height: 20),
+                      const SizedBox(height: 32),
+                      
+                      // Loading spinner
+                      SizedBox(
+                        width: 60,
+                        height: 60,
+                        child: CircularProgressIndicator(
+                          color: Colors.greenAccent,
+                          strokeWidth: 4,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      
                       Text(
-                        'Mengambil foto...',
+                        'Memproses Foto',
                         style: TextStyle(
                           color: Colors.white,
-                          fontSize: 18,
+                          fontSize: 22,
                           fontWeight: FontWeight.bold,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Mohon tunggu sebentar...',
+                        style: TextStyle(
+                          color: Colors.grey.shade400,
+                          fontSize: 14,
                         ),
                       ),
                     ],
@@ -533,29 +1701,59 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
     );
   }
 
-  Widget _buildBlinkIndicator(String label, bool detected, IconData icon) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+  IconData _getInstructionIcon() {
+    if (_isCapturing) return Icons.check_circle_rounded;
+    if (_faceDetectedTime != null) {
+      if (_leftBlinkDetected && _rightBlinkDetected) {
+        return Icons.check_circle_rounded;
+      }
+      return Icons.visibility_rounded;
+    }
+    return Icons.face_rounded;
+  }
+
+  Widget _buildModernBlinkIndicator(String label, bool detected, IconData icon) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
       decoration: BoxDecoration(
         color: detected
-            ? Colors.green.withOpacity(0.8)
-            : Colors.white.withOpacity(0.3),
-        borderRadius: BorderRadius.circular(20),
+            ? Colors.greenAccent.withOpacity(0.2) // Latar belakang indikator transparan
+            : Colors.black.withOpacity(0.6),
+        borderRadius: BorderRadius.circular(25),
+        border: Border.all(
+          color: detected ? Colors.greenAccent : Colors.white.withOpacity(0.3),
+          width: 2,
+        ),
+        boxShadow: detected ? [
+          BoxShadow(
+            color: Colors.greenAccent.withOpacity(0.4),
+            blurRadius: 15,
+            spreadRadius: 2,
+          ),
+        ] : [],
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            detected ? Icons.check_circle : icon,
-            color: Colors.white,
-            size: 20,
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 300),
+            child: Icon(
+              detected ? Icons.check_circle_rounded : icon,
+              color: detected ? Colors.greenAccent : Colors.white, // Warna ikon berubah
+              size: 22,
+              key: ValueKey(detected),
+            ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 10),
           Text(
             label,
             style: const TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.bold,
+              fontSize: 15,
+              letterSpacing: 0.3,
             ),
           ),
         ],
@@ -564,36 +1762,79 @@ class _BlinkDetectionCameraState extends State<BlinkDetectionCamera> {
   }
 }
 
-// Custom painter for face oval guide
-class _FaceOvalPainter extends CustomPainter {
+// Modern Custom painter for face circle guide (Previously _ModernFaceOvalPainter)
+class _ModernFaceCirclePainter extends CustomPainter {
   final Color color;
   final bool isCapturing;
+  final bool faceDetected;
+  final double pulseScale;
 
-  _FaceOvalPainter({required this.color, required this.isCapturing});
+  _ModernFaceCirclePainter({
+    required this.color,
+    required this.isCapturing,
+    required this.faceDetected,
+    required this.pulseScale,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = isCapturing ? Colors.green : color.withOpacity(0.6)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0;
-
     final center = Offset(size.width / 2, size.height / 2.5);
-    final radiusX = size.width * 0.35;
-    final radiusY = size.height * 0.25;
+    final baseRadius = size.width * 0.35; // Radius untuk lingkaran sempurna
+    final currentRadius = baseRadius * (faceDetected ? pulseScale : 1.0);
 
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: center,
-        width: radiusX * 2,
-        height: radiusY * 2,
-      ),
-      paint,
-    );
+    // Draw outer glow (Menggunakan lingkaran sempurna)
+    if (faceDetected) {
+      final glowPaint = Paint()
+        ..shader = LinearGradient( // Gradient untuk glow
+          colors: [color.withOpacity(0.3), Colors.blue.withOpacity(0.3)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ).createShader(Rect.fromCircle(center: center, radius: currentRadius + 10))
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 10.0 // Ketebalan glow
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 15); // Blur lebih kuat
+
+      canvas.drawCircle(center, currentRadius + 5, glowPaint); // Lingkaran glow sedikit lebih besar
+    }
+
+    // Draw main circle with dashed effect
+    final paint = Paint()
+      ..shader = LinearGradient( // Gradient untuk garis lingkaran
+        colors: isCapturing 
+            ? [Colors.greenAccent, Colors.lightGreen]
+            : [color, color.withOpacity(0.7)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ).createShader(Rect.fromCircle(center: center, radius: currentRadius))
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.0; // Ketebalan garis lingkaran
+
+    final path = Path()..addOval(Rect.fromCircle(center: center, radius: currentRadius));
+    
+    // Draw dashed circle
+    const dashWidth = 12.0; // Lebar dash sedikit lebih kecil
+    const dashSpace = 8.0;
+    double distance = 0.0;
+
+    final pathMetrics = path.computeMetrics();
+
+    for (final pathMetric in pathMetrics) {
+      while (distance < pathMetric.length) {
+        final extractPath = pathMetric.extractPath(
+          distance,
+          distance + dashWidth,
+        );
+        canvas.drawPath(extractPath, paint);
+        distance += dashWidth + dashSpace;
+      }
+    }
   }
 
   @override
-  bool shouldRepaint(_FaceOvalPainter oldDelegate) {
-    return oldDelegate.color != color || oldDelegate.isCapturing != isCapturing;
+  bool shouldRepaint(_ModernFaceCirclePainter oldDelegate) {
+    return oldDelegate.color != color || 
+           oldDelegate.isCapturing != isCapturing ||
+           oldDelegate.faceDetected != faceDetected ||
+           oldDelegate.pulseScale != pulseScale;
   }
 }
